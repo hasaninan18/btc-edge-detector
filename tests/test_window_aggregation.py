@@ -7,9 +7,9 @@ independent bet before any significance is claimed.
 import csv
 import time
 
-import btc_prediction_edge as E
+import btc_edge as E
 
-FILL = E  # module owning settlement_price / fetch_kalshi_settlement (patch target)
+from btc_edge.live import fill as FILL  # owns settlement_price / fetch_kalshi_settlement
 
 PAST = time.time() - 7200
 

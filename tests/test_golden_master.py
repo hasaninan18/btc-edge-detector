@@ -22,7 +22,7 @@ from dataclasses import asdict
 
 import pytest
 
-import btc_prediction_edge as E
+import btc_edge as E
 
 REL = 1e-9
 

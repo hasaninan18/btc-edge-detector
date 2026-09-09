@@ -7,10 +7,10 @@ import time
 
 import pytest
 
-import btc_prediction_edge as E
+import btc_edge as E
 from _synth import gbm_flat
 
-FILL = E  # module owning settlement_price (patch target)
+from btc_edge.live import fill as FILL  # owns settlement_price
 
 
 # ---------------------------------------------------------- recalibrator fit --

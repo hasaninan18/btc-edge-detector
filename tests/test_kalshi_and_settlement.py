@@ -11,10 +11,10 @@ from datetime import datetime, timezone
 import csv
 import pytest
 
-import btc_prediction_edge as E
+import btc_edge as E
 from _synth import gbm_ohlc
 
-FILL = E  # module owning settlement_price / fetch_kalshi_settlement (patch target)
+from btc_edge.live import fill as FILL  # owns settlement_price / fetch_kalshi_settlement
 
 
 # ------------------------------------------------------------- effective_tau --

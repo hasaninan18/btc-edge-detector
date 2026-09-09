@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-import btc_prediction_edge as E
+import btc_edge as E
 from _synth import gbm_flat
 
-FILL = E  # module owning the settlement hooks patched below (patch target)
+from btc_edge.live import fill as FILL  # module owning the settlement hooks patched below
 
 
 def test_backtest_beats_coinflip_on_gbm():

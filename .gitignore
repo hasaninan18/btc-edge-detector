@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Claude Code worktree/session scratch
+.claude/
+
+# --- runtime data, not source ---
+# The live paper-trade log and raw capture streams. They grow every run and are
+# reproducible from a fresh capture; the frozen copy the tests need lives in
+# tests/fixtures/paper_trades.csv instead.
+/paper_trades.csv
+/paper_trades.csv.tmp
+/kalshi_raw.jsonl
+
+# Backtest candle cache (re-fetched from Coinbase on demand)
+.candle_cache/

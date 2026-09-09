@@ -1,0 +1,11 @@
+# Runtime dependencies for btc_edge.
+#
+# The package is intentionally close to stdlib-only — urllib for HTTP, csv/json
+# for storage, math/statistics for the model. There is nothing to install here
+# on most systems.
+#
+# certifi is the ONE optional dependency: framework Python on macOS ships
+# without a root-certificate bundle, so the HTTPS calls to Coinbase and Kalshi
+# fail with a TLS verification error until certifi is present. On Linux and on
+# python.org builds with certs installed it is not needed.
+certifi >= 2024.2.2 ; sys_platform == "darwin"

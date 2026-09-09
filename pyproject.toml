@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "btc-edge-detector"
+version = "0.3.0"
+description = "Paper-trading harness that tests a GBM fair-value model against Kalshi's 15-minute BTC up/down market"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    # see requirements.txt — certifi only, and only on macOS framework Python
+    'certifi >= 2024.2.2 ; sys_platform == "darwin"',
+]
+
+[project.optional-dependencies]
+dev = ["pytest >= 8.0"]
+
+[project.scripts]
+btc-edge = "btc_edge.cli:main"
+
+[tool.setuptools]
+packages = ["btc_edge", "btc_edge.live"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "network: test reaches a live external API (skipped unless --run-network)",
+]

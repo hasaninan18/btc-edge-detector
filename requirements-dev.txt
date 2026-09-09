@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Test runner. The suite is plain pytest — no plugins required.
+pytest >= 8.0

@@ -8,6 +8,11 @@ The load-bearing idea: every sample inside a 15-min window resolves on the SAME
 settlement, so the ~45 rows a window produces are one observation wearing 45
 hats. The headline number aggregates to one bet per window before it puts a
 confidence interval on anything.
+
+That applies to the Brier comparison as much as to PnL, so the scoring section
+reports the paired delta (model - market) at window level with a block
+bootstrap over whole windows, and keeps the per-sample number only as a
+labelled, non-inferential diagnostic.
 """
 import csv
 import math
@@ -15,8 +20,64 @@ from pathlib import Path
 from statistics import stdev
 from typing import Optional
 
-from btc_edge.metrics import _brier
+from btc_edge.metrics import _brier, block_bootstrap_brier_delta
 from btc_edge.live.paperlog import LOG_PATH
+
+# Bootstrap settings live here so the printed report can state them and a test
+# can pin the numbers. Seeded: two runs over the same log must agree exactly.
+BOOTSTRAP_RESAMPLES = 10_000
+BOOTSTRAP_SEED = 20260909
+
+
+def _window_id(row: dict) -> str:
+    return row.get("window_id") or row.get("expiry_ts", "")
+
+
+def _first_per_window(rows: list[dict]) -> list[dict]:
+    """The earliest row of each window — the only one actable on in real time."""
+    first: dict[str, dict] = {}
+    for r in rows:
+        wid = _window_id(r)
+        prev = first.get(wid)
+        if prev is None or r["ts"] < prev["ts"]:
+            first[wid] = r
+    return list(first.values())
+
+
+def _triple(row: dict) -> tuple[float, float, int]:
+    return (float(row["model_prob_up"]), float(row["market_prob_up"]),
+            int(row["outcome_up"]))
+
+
+def _brier_level(blocks: list[list[tuple[float, float, int]]]) -> Optional[dict]:
+    """Model/market Brier plus the paired delta and its block-bootstrap CI.
+
+    One `block` per independent unit (a window). Resampling happens at block
+    granularity, so this is correct whether a block holds one row (window-level)
+    or all ~45 of a window's samples (the sample-level diagnostic).
+    """
+    flat = [t for b in blocks if b for t in b]
+    if not flat:
+        return None
+    outcomes = [t[2] for t in flat]
+    bs = block_bootstrap_brier_delta(blocks, n_resamples=BOOTSTRAP_RESAMPLES,
+                                     seed=BOOTSTRAP_SEED)
+    return {
+        "windows": bs["n_blocks"],
+        "samples": len(flat),
+        "model": _brier([t[0] for t in flat], outcomes),
+        "market": _brier([t[1] for t in flat], outcomes),
+        "delta": bs["delta"],
+        "ci95": (bs["lo"], bs["hi"]),
+        "p_model_better": bs["p_model_better"],
+    }
+
+
+def _print_brier_row(label: str, lvl: dict) -> None:
+    lo, hi = lvl["ci95"]
+    print(f"  {label:<26} {lvl['windows']:7d} {lvl['samples']:7d} "
+          f"{lvl['model']:8.4f} {lvl['market']:8.4f} {lvl['delta']:+9.4f}   "
+          f"[{lo:+.4f}, {hi:+.4f}]")
 
 
 def edge_report(path: Path = LOG_PATH) -> Optional[dict]:
@@ -37,13 +98,6 @@ def edge_report(path: Path = LOG_PATH) -> Optional[dict]:
               "(watch --prompt-quotes / --kalshi), then re-run")
         return None
 
-    # Calibration of the model against realized outcomes, on quoted samples only.
-    m_probs = [float(r["model_prob_up"]) for r in rows]
-    outcomes = [int(r["outcome_up"]) for r in rows]
-
-    # Did the market itself predict well? (its implied prob vs realized)
-    mkt_probs = [float(r["market_prob_up"]) for r in rows]
-
     taken = [r for r in rows if r.get("recommended_side")]
     settled_bets = [r for r in taken if r.get("pnl_cents")]
     pnl = sum(float(r["pnl_cents"]) for r in settled_bets)
@@ -59,13 +113,7 @@ def edge_report(path: Path = LOG_PATH) -> Optional[dict]:
     # a "significant" edge. So the headline below aggregates to one bet per
     # window — the earliest sample that cleared the threshold, which is also the
     # only one you could realistically have acted on in real time.
-    per_window: dict[str, dict] = {}
-    for r in settled_bets:
-        wid = r.get("window_id") or r.get("expiry_ts", "")
-        prev = per_window.get(wid)
-        if prev is None or r["ts"] < prev["ts"]:
-            per_window[wid] = r
-    win_bets = list(per_window.values())
+    win_bets = _first_per_window(settled_bets)
     win_pnls = [float(r["pnl_cents"]) for r in win_bets]
 
     # Bucket taken bets by the edge we thought we had (window-level).
@@ -80,14 +128,69 @@ def edge_report(path: Path = LOG_PATH) -> Optional[dict]:
 
     n_windows = len({r.get("window_id") for r in rows})
     print(f"\nquoted & settled: {len(rows)} samples across {n_windows} windows")
-    print(f"model  Brier vs outcomes: {_brier(m_probs, outcomes):.4f}")
-    print(f"market Brier vs outcomes: {_brier(mkt_probs, outcomes):.4f}  "
-          f"(if the market beats the model, there's no edge to take)")
+
+    # ---- scoring: the paired delta, one observation per window ----
+    #
+    # The aggregation choice, said out loud because it decides the number: the
+    # headline row scores the FIRST ACTIONABLE sample of each window — the
+    # earliest row that cleared the edge threshold and became a bet. Three
+    # reasons. (1) It is the row that could actually have been traded; later
+    # rows in the same window are hindsight. (2) It is exactly the row the PnL
+    # headline below uses, so Brier and PnL describe the same decisions instead
+    # of two different populations. (3) One row per window makes the
+    # observations independent, which is the precondition for any interval.
+    #
+    # Its cost, said equally out loud: conditioning on "we bet" keeps only
+    # windows where the model disagreed with the quote, which is not a fair
+    # test of calibration in general. So the same delta over the first quoted
+    # sample of EVERY window is printed underneath as the unconditional check.
+    # The per-sample number — the one previously quoted as 0.1035 vs 0.1075 —
+    # stays as a diagnostic and nothing more.
+    by_window: dict[str, list[tuple[float, float, int]]] = {}
+    for r in rows:
+        by_window.setdefault(_window_id(r), []).append(_triple(r))
+    lvl_sample = _brier_level(list(by_window.values()))
+    lvl_all = _brier_level([[_triple(r)] for r in _first_per_window(rows)])
+    lvl_traded = _brier_level([[_triple(r)] for r in win_bets])
+
+    print("\nmodel vs market Brier — paired delta = model - market "
+          "(negative = model beat the quote):")
+    print(f"  {'level':<26} {'windows':>7} {'samples':>7} {'model':>8} "
+          f"{'market':>8} {'delta':>9}   95% CI (block bootstrap)")
+    if lvl_traded:
+        _print_brier_row("window-level (traded)", lvl_traded)
+    _print_brier_row("window-level (all quoted)", lvl_all)
+    _print_brier_row("per-sample (diagnostic)", lvl_sample)
+    print("    ^ correlated rows: one window counted up to 45 times. The CI is "
+          "block-bootstrapped,")
+    print("      but the point estimate is still weighted by samples-per-window "
+          "— do NOT read as significance")
+    print(f"  ({BOOTSTRAP_RESAMPLES:,} resamples drawing whole windows, "
+          f"seed {BOOTSTRAP_SEED})")
+
+    head = lvl_traded or lvl_all
+    head_label = "traded windows" if lvl_traded else "all quoted windows"
+    h_lo, h_hi = head["ci95"]
+    if h_hi < 0:
+        verdict = f"model beats the market on {head_label}, significant at 95%"
+    elif h_lo > 0:
+        verdict = f"market beats the model on {head_label}, significant at 95%"
+    else:
+        verdict = (f"CI straddles zero on {head_label} — no measurable scoring "
+                   f"edge either way")
+    print(f"  -> {verdict}; model scored better in "
+          f"{head['p_model_better']:.0%} of resamples")
+
+    brier = {"sample": lvl_sample, "window_traded": lvl_traded,
+             "window_all": lvl_all,
+             "bootstrap": {"n_resamples": BOOTSTRAP_RESAMPLES,
+                           "seed": BOOTSTRAP_SEED}}
 
     if not settled_bets:
         print("\nno bets cleared the edge threshold yet")
         return {"n": len(rows), "pnl": 0.0, "bets": 0, "window_bets": 0,
-                "mean_c": None, "ci95": None, "significant": False}
+                "mean_c": None, "ci95": None, "significant": False,
+                "brier": brier}
 
     print(f"\nsample-level (correlated — do NOT read as significance):")
     print(f"  bets {len(settled_bets)}   hit {wins / len(settled_bets):.1%}   "
@@ -160,4 +263,4 @@ def edge_report(path: Path = LOG_PATH) -> Optional[dict]:
 
     return {"n": len(rows), "pnl": pnl, "bets": len(settled_bets),
             "window_bets": len(win_pnls), "mean_c": mean_c, "ci95": ci,
-            "significant": significant}
+            "significant": significant, "brier": brier}

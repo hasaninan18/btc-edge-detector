@@ -27,15 +27,30 @@ actually have acted on — leaves **32 independent window-level bets**.
 | **window-level (independent — the number that counts)** | 32 | 65.6% | +465c | **+14.54c** | **[−0.15c, +29.22c]** |
 | sample-level (correlated — *not* valid for significance) | 82 | 78.0% | +1,201c | +14.65c | — |
 
-| calibration (quoted samples) | Brier vs realized |
-|---|---:|
-| model | 0.1035 |
-| market | 0.1075 |
+Scoring gets the same treatment. Two separate Brier numbers hide the fact that
+both are scored against one shared set of settlements, so the report gives the
+**paired delta** (model − market; negative means the model won) with a 95%
+interval from a bootstrap that resamples **whole windows**, 10,000 times, seeded:
 
-**Read this honestly:** the window-level 95% confidence interval **straddles
-zero**. The point estimate is positive and the model's Brier score edges the
-market's, but on 32 independent bets that is statistically indistinguishable
-from no edge at all. The model has *not* been shown to beat the market.
+| level | windows | samples | model | market | delta | 95% CI (block bootstrap) |
+|---|---:|---:|---:|---:|---:|---|
+| **window-level (traded — the 32 bets above)** | 32 | 32 | 0.1973 | 0.1978 | **−0.0005** | **[−0.0481, +0.0606]** |
+| window-level (all quoted windows) | 54 | 54 | 0.1977 | 0.1946 | +0.0031 | [−0.0243, +0.0413] |
+| per-sample (correlated — *diagnostic only*) | 54 | 204 | 0.1035 | 0.1075 | −0.0040 | [−0.0156, +0.0111] |
+
+Window-level Brier is higher than per-sample Brier because the actable row sits
+~14 minutes from expiry, where the honest answer is near 50/50; the later rows
+that drag the per-sample average down are near-certain by then and could not
+have been traded.
+
+**Read this honestly:** the window-level 95% confidence interval on PnL
+**straddles zero**, and so does the interval on the Brier delta. The −0.0040
+per-sample Brier gap this project used to quote does not survive aggregation:
+on the 32 traded windows the delta is −0.0005, effectively nothing, and across
+all 54 quoted windows it **flips sign** — the market scores slightly better once
+the comparison is not restricted to windows where the model disagreed with it.
+On 32 independent bets, all of this is statistically indistinguishable from no
+edge. The model has *not* been shown to beat the market.
 
 Two caveats that both push the true number *lower* than the table:
 
@@ -100,7 +115,7 @@ btc_edge/
   model.py        realized_vol_per_minute, effective_tau, prob_finish_above
   calibration.py  the frozen one-parameter Platt recalibrator
   decision.py     decide(): model prob + market quote -> a logged Decision
-  metrics.py      Brier / log-loss / decile calibration table
+  metrics.py      Brier / log-loss / calibration table / block bootstrap
   backtest.py     historical replay + the time-ordered recal fit/eval harness
   report.py       edge_report(): model vs market over quoted+settled rows
   live/
@@ -128,12 +143,11 @@ why.
 
 ## Status and what's next
 
-This repository is **structure only** — the code is a faithful decomposition of
-the original single file, with a test suite and a safety net around it. Known
-open work, none of it done here:
+The package is a faithful decomposition of the original single file, with a test
+suite and a golden-master safety net around it. The one modelling-adjacent change
+since is the window-level Brier delta and its block bootstrap, above — a
+measurement fix, not a change to the model. Known open work:
 
-- window-level **Brier** comparison + a block bootstrap CI (the report
-  aggregates PnL per window but still scores Brier on all correlated samples)
 - alternative volatility models (EWMA, GARCH) and a Student-t tail, evaluated
   through the existing held-out harness
 - a transaction-cost / quote-staleness audit to establish whether the

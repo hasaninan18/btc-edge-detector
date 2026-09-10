@@ -45,10 +45,17 @@ def _synthetic_candles(seed: int = 1234, days: int = 8) -> list[dict]:
 
 # ---------------------------------------------------------------- edge_report --
 
-def test_edge_report_return_dict_is_pinned(fixtures_dir):
+def test_edge_report_pnl_dict_is_pinned(fixtures_dir):
+    """The PnL half of the return value. Unchanged since the original module.
+
+    `brier` was added later (window-level scoring) and is pinned separately
+    below; it is popped here so this constant stays the one the pre-package
+    code produced.
+    """
     buf = io.StringIO()
     with redirect_stdout(buf):
         res = E.edge_report(path=fixtures_dir / "paper_trades.csv")
+    res.pop("brier")
 
     assert res == {
         "n": 204,
@@ -61,6 +68,57 @@ def test_edge_report_return_dict_is_pinned(fixtures_dir):
     }
 
 
+def test_edge_report_brier_dict_is_pinned(fixtures_dir):
+    """Window-level Brier, the paired delta, and its block-bootstrap interval.
+
+    The bootstrap is seeded, so these interval bounds are exact numbers, not
+    approximately-right ones. Changing BOOTSTRAP_SEED or BOOTSTRAP_RESAMPLES in
+    btc_edge/report.py moves them and must be a deliberate edit here too.
+    """
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        res = E.edge_report(path=fixtures_dir / "paper_trades.csv")
+
+    assert res["brier"] == {
+        "bootstrap": {"n_resamples": 10_000, "seed": 20260909},
+        # The number this project used to quote: 204 correlated rows.
+        "sample": {
+            "windows": 54,
+            "samples": 204,
+            "model": pytest.approx(0.10347969181072715, rel=REL),
+            "market": pytest.approx(0.10751372058823529, rel=REL),
+            "delta": pytest.approx(-0.004034028777508143, rel=REL),
+            "ci95": pytest.approx(
+                (-0.015555009613474596, 0.01110820872183993), rel=REL),
+            "p_model_better": pytest.approx(0.7504, rel=REL),
+        },
+        # The headline: the 32 rows the PnL number is also computed from.
+        "window_traded": {
+            "windows": 32,
+            "samples": 32,
+            "model": pytest.approx(0.19732156049114027, rel=REL),
+            "market": pytest.approx(0.197788, rel=REL),
+            "delta": pytest.approx(-0.0004664395088597173, rel=REL),
+            "ci95": pytest.approx(
+                (-0.04814834074285129, 0.060609936629548694), rel=REL),
+            "p_model_better": pytest.approx(0.5518, rel=REL),
+        },
+        # Unconditional check: first quoted sample of every window. Note the
+        # delta is POSITIVE here — the market scores better once the sample is
+        # not selected on the model having disagreed with it.
+        "window_all": {
+            "windows": 54,
+            "samples": 54,
+            "model": pytest.approx(0.19772247955846492, rel=REL),
+            "market": pytest.approx(0.19461931481481484, rel=REL),
+            "delta": pytest.approx(0.0031031647436501, rel=REL),
+            "ci95": pytest.approx(
+                (-0.024349440976947686, 0.04134042974296799), rel=REL),
+            "p_model_better": pytest.approx(0.4664, rel=REL),
+        },
+    }
+
+
 def test_edge_report_brier_lines_are_pinned(fixtures_dir):
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -68,8 +126,14 @@ def test_edge_report_brier_lines_are_pinned(fixtures_dir):
     out = buf.getvalue()
 
     assert "quoted & settled: 204 samples across 54 windows" in out
-    assert "model  Brier vs outcomes: 0.1035" in out
-    assert "market Brier vs outcomes: 0.1075" in out
+    assert ("  window-level (traded)           32      32   0.1973   0.1978   "
+            "-0.0005   [-0.0481, +0.0606]") in out
+    assert ("  window-level (all quoted)       54      54   0.1977   0.1946   "
+            "+0.0031   [-0.0243, +0.0413]") in out
+    assert ("  per-sample (diagnostic)         54     204   0.1035   0.1075   "
+            "-0.0040   [-0.0156, +0.0111]") in out
+    assert "do NOT read as significance" in out
+    assert "CI straddles zero on traded windows" in out
     assert "WINDOW-LEVEL (independent — this is the number that counts):" in out
     assert "bets 32   hit 65.6%   PnL +465c   avg +14.54c/bet" in out
     assert "95% CI: [-0.15c, +29.22c]" in out

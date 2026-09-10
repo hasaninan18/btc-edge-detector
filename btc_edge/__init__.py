@@ -56,7 +56,13 @@ from btc_edge.data import (
     kalshi_quote_fn,
 )
 from btc_edge.decision import KELLY_CAP, MIN_EDGE, Decision, decide
-from btc_edge.metrics import _brier, _calibration_report, _log_loss
+from btc_edge.metrics import (
+    _brier,
+    _calibration_report,
+    _log_loss,
+    block_bootstrap_brier_delta,
+    brier_delta,
+)
 from btc_edge.model import (
     MIN_CLOSES_FOR_VOL,
     SETTLE_AVG_MINUTES,
@@ -99,6 +105,7 @@ __all__ = [
     "Decision", "decide", "MIN_EDGE", "KELLY_CAP",
     # metrics
     "_brier", "_log_loss", "_calibration_report",
+    "brier_delta", "block_bootstrap_brier_delta",
     # backtest
     "Sample", "BacktestResult", "RecalEval", "collect_samples", "score_samples",
     "backtest", "fit_and_eval_recalibration", "load_candles_cached",

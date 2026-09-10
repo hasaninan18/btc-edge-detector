@@ -9,7 +9,7 @@ experiment) must be judged on.
 import json
 import time
 from bisect import bisect_left, bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -67,11 +67,21 @@ def collect_samples(
     sample_every: int = 1,
     verbose: bool = False,
     avg_settle: bool = True,
+    vol_fn: Callable[[list[float]], float] = realized_vol_per_minute,
+    prob_fn: Callable[..., float] = prob_finish_above,
 ) -> list[Sample]:
     """
     Walk historical candles once and emit a raw (unrecalibrated) model sample at
     every minute of every aligned window. Scoring, recalibration and PnL are all
     layered on top of this — the expensive replay happens exactly once.
+
+    `vol_fn` and `prob_fn` are the swap points for the volatility/tail
+    experiment in `btc_edge.experiments`. `vol_fn` takes the trailing closes and
+    returns a per-minute sigma (see `btc_edge.vol` for EWMA and GARCH);
+    `prob_fn` is called exactly as `prob_finish_above` is, so a different
+    innovation distribution goes in as
+    `partial(prob_finish_above, cdf=standardized_t_cdf(5))`. Both default to
+    the baseline, so an unparameterised call is byte-identical to before.
 
     avg_settle=True replays the contract Kalshi actually writes: both the strike
     and the settlement are 60-second averages (of the minute *ending* at the
@@ -132,11 +142,11 @@ def collect_samples(
             hist = closes_sorted[lo:hi]
             if len(hist) < MIN_CLOSES_FOR_VOL:
                 continue
-            sigma = realized_vol_per_minute(hist)
+            sigma = vol_fn(hist)
             price = float(bar["close"])
             minutes_left = (expiry_ts - t) / 60.0
-            p_up = prob_finish_above(price, strike, minutes_left, sigma,
-                                     avg_minutes=avg_min)
+            p_up = prob_fn(price, strike, minutes_left, sigma,
+                           avg_minutes=avg_min)
             out.append(Sample(p_up, outcome_up, minutes_left, window_ix))
 
         if verbose and window_ix and window_ix % 200 == 0:
@@ -209,6 +219,12 @@ class RecalEval:
     test_samples: int
     raw: BacktestResult      # held-out test, no recalibration
     calibrated: BacktestResult  # held-out test, recalibrated
+    # The held-out samples and their calibrated probabilities, exposed so a
+    # caller can resample them. `BacktestResult` only carries aggregates, and
+    # you cannot bootstrap a confidence interval out of a mean. Nothing here is
+    # new information — it is what the fields above were computed from.
+    test: list[Sample] = field(default_factory=list)
+    calibrated_probs: list[float] = field(default_factory=list)
 
 
 def fit_and_eval_recalibration(
@@ -238,6 +254,8 @@ def fit_and_eval_recalibration(
         test_samples=len(test),
         raw=score_samples(test, recal=None),
         calibrated=score_samples(test, recal=recal),
+        test=test,
+        calibrated_probs=[recal.apply(s.raw_prob_up) for s in test],
     )
 
 

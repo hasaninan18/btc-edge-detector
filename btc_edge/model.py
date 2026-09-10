@@ -7,6 +7,7 @@ expiry. See the derivation in the docstring.
 """
 import math
 from statistics import stdev
+from typing import Callable
 
 # Contract window length. Lives here (rather than in the scheduler) because both
 # the live loop and the backtest need it and this module has no dependencies.
@@ -24,6 +25,13 @@ def realized_vol_per_minute(closes: list[float]) -> float:
         raise ValueError("need at least ~20 closes for a stable estimate")
     log_rets = [math.log(closes[i] / closes[i-1]) for i in range(1, len(closes))]
     return stdev(log_rets)
+
+
+# This flat stdev assumes volatility is constant across the lookback, which BTC
+# violates. `btc_edge.vol` supplies EWMA and GARCH(1,1) alternatives behind the
+# same `list[float] -> float` signature; `collect_samples(vol_fn=...)` is the
+# hook that swaps them in. As of the 30-day evaluation in `btc_edge.experiments`
+# neither beat this one out of sample, so it remains the default.
 
 
 def _norm_cdf(x: float) -> float:
@@ -81,6 +89,7 @@ def prob_finish_above(
     minutes_to_expiry: float,
     sigma_per_minute: float,
     avg_minutes: float = SETTLE_AVG_MINUTES,
+    cdf: Callable[[float], float] = _norm_cdf,
 ) -> float:
     """
     Under geometric Brownian motion with zero drift over short horizons,
@@ -90,6 +99,19 @@ def prob_finish_above(
     `tau` is the *effective* time from `effective_tau`, which accounts for the
     contract settling on a 60-second average. Pass avg_minutes=0 to recover the
     naive point-settlement model (used by tests that generate point outcomes).
+
+    `cdf` is the distribution of the standardised innovation. It defaults to the
+    normal, and anything passed in its place MUST have unit variance — the
+    scale of the move belongs to `sigma_per_minute`, and a CDF that also
+    carries scale would double-count it. `btc_edge.tails.standardized_t_cdf`
+    supplies fat-tailed alternatives on that contract.
+
+    Note the -0.5*sigma^2*tau Ito term is left alone when the tail changes. It
+    is the drift that makes E[S_T] = S_t under *lognormal* returns and is not
+    the exact martingale correction for a t; at these horizons it is worth
+    about 4e-6 in log space against a 2e-3 standard deviation, so correcting it
+    would move no probability by a full basis point while making the two
+    variants differ in drift as well as shape. Isolating the tail is the point.
     """
     if minutes_to_expiry <= 0:
         return 1.0 if price > strike else 0.0
@@ -99,4 +121,4 @@ def prob_finish_above(
     if total_sd == 0:
         return 1.0 if price > strike else 0.0
     z = (math.log(price / strike) - 0.5 * total_var) / total_sd
-    return _norm_cdf(z)
+    return cdf(z)

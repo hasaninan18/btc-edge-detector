@@ -85,6 +85,7 @@ python -m btc_edge edge        # the model-vs-market report above
 
 python -m btc_edge backtest --days 7
 python -m btc_edge recalibrate --days 30 --save   # refit the Platt scaler
+python -m btc_edge vol-tails --days 30            # EWMA/GARCH/Student-t bake-off
 ```
 
 The paper log is `paper_trades.csv` in the working directory; the frozen
@@ -101,7 +102,10 @@ btc_edge/
   calibration.py  the frozen one-parameter Platt recalibrator
   decision.py     decide(): model prob + market quote -> a logged Decision
   metrics.py      Brier / log-loss / decile calibration table
+  vol.py          EWMA + GARCH(1,1) alternatives to the flat stdev estimator
+  tails.py        standardised Student-t innovations (incomplete beta, no scipy)
   backtest.py     historical replay + the time-ordered recal fit/eval harness
+  experiments.py  vol x tail bake-off scored on held-out windows
   report.py       edge_report(): model vs market over quoted+settled rows
   live/
     paperlog.py   the CSV schema and append
@@ -110,8 +114,11 @@ btc_edge/
   cli.py          argument parsing and command dispatch
 tests/
   test_golden_master.py   pins edge_report()/backtest() output against refactors
+  test_vol_and_tails.py   the vol/tail experiment and its statistics
   test_*.py               ~40 unit tests (converted from the original scripts)
   fixtures/               a frozen copy of the paper log for the golden master
+docs/
+  vol-and-tails.md        write-up of the volatility/tail experiment
 ```
 
 ## Tests
@@ -126,15 +133,36 @@ python -m pytest --run-network   # also hit live Kalshi/Coinbase
 that test is supposed to fail — update its constants in the same commit and say
 why.
 
+## Volatility and tail assumptions — tested, no improvement
+
+The pricer assumes constant volatility over the lookback and Gaussian log
+returns. Both are false for BTC, so sixteen combinations of EWMA / GARCH(1,1)
+volatility and Student-t (ν ∈ {4, 6, 10}) tails were evaluated against the
+baseline through the existing held-out recalibration harness — 30 days of
+candles, 862 held-out windows, a 2,000-resample block bootstrap over whole
+windows.
+
+**None of them beat the baseline by a distinguishable margin.** The best point
+estimate was GARCH(1,1) at −0.00040 Brier (0.27% relative), CI
+[−0.00130, +0.00048]. Every interval straddles zero, so the flat stdev and the
+Gaussian remain the defaults.
+
+The Student-t result has a reason worth knowing: at unit variance a Student-t is
+*more* peaked than a normal inside |z| ≈ 1.9 and only fatter beyond it, and 88%
+of these 15-minute samples sit inside that crossover. So a t tail acts as a
+sharpener here — the same job the Platt recalibrator already does. It improves
+raw Brier and then the recalibrator's slope drops from 1.162 to 0.986 and the
+gain cancels. Downstream of recalibration the tail choice is close to
+unidentified.
+
+Full write-up, including threats to the conclusion: **[docs/vol-and-tails.md](docs/vol-and-tails.md)**.
+
 ## Status and what's next
 
-This repository is **structure only** — the code is a faithful decomposition of
-the original single file, with a test suite and a safety net around it. Known
-open work, none of it done here:
+The code is a faithful decomposition of the original single file, with a test
+suite and a safety net around it. Known open work, not done here:
 
 - window-level **Brier** comparison + a block bootstrap CI (the report
   aggregates PnL per window but still scores Brier on all correlated samples)
-- alternative volatility models (EWMA, GARCH) and a Student-t tail, evaluated
-  through the existing held-out harness
 - a transaction-cost / quote-staleness audit to establish whether the
   +14.5c/window figure is gross or net

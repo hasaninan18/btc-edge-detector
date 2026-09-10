@@ -8,6 +8,7 @@
     python -m btc_edge edge
     python -m btc_edge backtest --days 7
     python -m btc_edge recalibrate --days 30 [--save]
+    python -m btc_edge vol-tails   --days 30
 
 No auth. No money at risk. Log results, evaluate after 200+ observations before
 considering real money.
@@ -26,6 +27,7 @@ from btc_edge.backtest import (
     vig_market,
 )
 from btc_edge.calibration import RECAL_PATH, Recalibrator
+from btc_edge.experiments import build_variants, print_report, run_experiment
 from btc_edge.data import Quote, current_price, fetch_recent_1min_candles
 from btc_edge.decision import decide
 from btc_edge.model import realized_vol_per_minute
@@ -99,6 +101,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_rc.add_argument("--save", action="store_true",
                       help="write recalibrator.json if it improves held-out loss")
 
+    p_vt = sub.add_parser(
+        "vol-tails",
+        help="held-out bake-off of EWMA/GARCH vol and Student-t tails "
+             "against the baseline")
+    p_vt.add_argument("--days", type=float, default=30)
+    p_vt.add_argument("--vol-lookback", type=int, default=90)
+    p_vt.add_argument("--sample-every", type=int, default=1)
+    p_vt.add_argument("--split", type=float, default=0.7,
+                      help="train fraction (earlier windows); rest is held out")
+    p_vt.add_argument("--no-garch", action="store_true",
+                      help="skip GARCH(1,1); the rest of the grid is much faster")
+    p_vt.add_argument("--n-boot", type=int, default=2000,
+                      help="block-bootstrap resamples for the Brier delta CI")
+
     args = ap.parse_args(argv)
 
     if args.cmd == "once":
@@ -149,4 +165,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"\nsaved -> {RECAL_PATH} (improves held-out log-loss)")
             else:
                 print("\nnot saved: recalibration did not improve held-out log-loss")
+    elif args.cmd == "vol-tails":
+        candles = load_candles_cached(args.days)
+        rep = run_experiment(
+            candles, days=args.days, split=args.split,
+            vol_lookback=args.vol_lookback, sample_every=args.sample_every,
+            variants=build_variants(garch=not args.no_garch),
+            n_boot=args.n_boot,
+        )
+        print()
+        print_report(rep)
     return 0

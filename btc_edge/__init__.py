@@ -12,7 +12,10 @@ The package is a straight decomposition of what was one 1,500-line file:
     calibration  the frozen one-parameter Platt recalibrator
     decision     decide(): model prob + quote -> a logged Decision
     metrics      Brier / log-loss / calibration table
+    vol          EWMA + GARCH(1,1) alternatives to the flat stdev estimator
+    tails        Student-t innovations as an alternative to the Gaussian tail
     backtest     historical replay + the time-ordered recal harness
+    experiments  vol x tail bake-off, scored on held-out windows
     report       edge_report(): model-vs-market over quoted+settled rows
     live         paper log, outcome fill, and the watch/capture loops
     cli          `python -m btc_edge ...`
@@ -66,7 +69,33 @@ from btc_edge.model import (
     prob_finish_above,
     realized_vol_per_minute,
 )
+from btc_edge.experiments import (
+    ExperimentReport,
+    MemoVol,
+    Variant,
+    VariantResult,
+    block_bootstrap_brier_delta,
+    build_variants,
+    format_report,
+    print_report,
+    run_experiment,
+)
 from btc_edge.report import edge_report
+from btc_edge.tails import (
+    normal_cdf,
+    regularized_incomplete_beta,
+    standardized_t_cdf,
+    student_t_cdf,
+)
+from btc_edge.vol import (
+    DEFAULT_LAMBDA,
+    Garch11,
+    GarchVol,
+    ewma_vol_factory,
+    ewma_vol_per_minute,
+    fit_garch11,
+    log_returns,
+)
 from btc_edge.live import (
     CSV_FIELDS,
     LOG_PATH,
@@ -103,6 +132,16 @@ __all__ = [
     "Sample", "BacktestResult", "RecalEval", "collect_samples", "score_samples",
     "backtest", "fit_and_eval_recalibration", "load_candles_cached",
     "vig_market", "print_backtest", "print_recal_eval",
+    # vol
+    "ewma_vol_per_minute", "ewma_vol_factory", "GarchVol", "Garch11",
+    "fit_garch11", "log_returns", "DEFAULT_LAMBDA",
+    # tails
+    "normal_cdf", "student_t_cdf", "standardized_t_cdf",
+    "regularized_incomplete_beta",
+    # experiments
+    "Variant", "VariantResult", "ExperimentReport", "MemoVol",
+    "build_variants", "run_experiment", "block_bootstrap_brier_delta",
+    "format_report", "print_report",
     # report
     "edge_report",
     # live

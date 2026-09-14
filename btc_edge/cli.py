@@ -7,6 +7,7 @@
     python -m btc_edge summary
     python -m btc_edge edge
     python -m btc_edge backtest --days 7
+    python -m btc_edge market-backtest --days 14   # vs REAL Kalshi quotes
     python -m btc_edge recalibrate --days 30 [--save]
     python -m btc_edge vol-tails   --days 30
 
@@ -29,7 +30,14 @@ from btc_edge.backtest import (
 from btc_edge.calibration import RECAL_PATH, Recalibrator
 from btc_edge.experiments import build_variants, print_report, run_experiment
 from btc_edge.data import Quote, current_price, fetch_recent_1min_candles
-from btc_edge.decision import decide
+from btc_edge.decision import MIN_EDGE, decide
+from btc_edge.history import load_history
+from btc_edge.market_backtest import (
+    BOOTSTRAP_RESAMPLES,
+    MAX_SPREAD,
+    print_market_report,
+    run_market_backtest,
+)
 from btc_edge.model import realized_vol_per_minute
 from btc_edge.report import edge_report
 from btc_edge.live.fill import fill_outcomes, log_summary
@@ -86,10 +94,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_bt.add_argument("--vol-lookback", type=int, default=90)
     p_bt.add_argument("--sample-every", type=int, default=1)
     p_bt.add_argument("--simulate-market", action="store_true",
-                      help="add a toy counterparty for PnL sensitivity")
+                      help="add a toy counterparty for PnL sensitivity "
+                           "(use market-backtest for real quotes)")
     p_bt.add_argument("--vig", type=float, default=0.04)
     p_bt.add_argument("--recal", action="store_true",
                       help="apply the saved recalibrator during scoring")
+
+    p_mb = sub.add_parser(
+        "market-backtest",
+        help="score the model against real Kalshi quotes over settled history "
+             "(window-level PnL net of fees, Brier vs the mid)")
+    p_mb.add_argument("--days", type=float, default=14)
+    p_mb.add_argument("--min-edge", type=float, default=MIN_EDGE,
+                      help="probability edge over the ask required to bet")
+    p_mb.add_argument("--max-spread", type=float, default=MAX_SPREAD,
+                      help="minutes with a wider yes bid/ask (dollars) are "
+                           "treated as having no book")
+    p_mb.add_argument("--vol-lookback", type=int, default=90)
+    p_mb.add_argument("--no-recal", action="store_true",
+                      help="score the raw GBM probability instead of the "
+                           "saved recalibration")
+    p_mb.add_argument("--n-boot", type=int, default=BOOTSTRAP_RESAMPLES)
 
     p_rc = sub.add_parser("recalibrate",
                           help="fit the recalibrator on history, save it")
@@ -151,6 +176,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             verbose=True,
         )
         print_backtest(r)
+    elif args.cmd == "market-backtest":
+        history = load_history(args.days)
+        if not history:
+            print("no settled windows in that span")
+            return 1
+        # spot must reach back one vol lookback before the first window
+        span_days = (history[-1].market.close_ts - history[0].market.open_ts
+                     + args.vol_lookback * 60) / 86400.0
+        candles = load_candles_cached(span_days + 0.05)
+        recal = Recalibrator() if args.no_recal else Recalibrator.load(RECAL_PATH)
+        r = run_market_backtest(history, candles, recal=recal,
+                                min_edge=args.min_edge, max_spread=args.max_spread,
+                                vol_lookback=args.vol_lookback, n_boot=args.n_boot)
+        print()
+        print_market_report(r)
     elif args.cmd == "recalibrate":
         candles = load_candles_cached(args.days)
         e = fit_and_eval_recalibration(

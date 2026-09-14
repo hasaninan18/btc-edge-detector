@@ -98,10 +98,18 @@ python -m btc_edge fill        # backfill outcomes / PnL for expired windows
 python -m btc_edge summary     # calibration + PnL over everything settled
 python -m btc_edge edge        # the model-vs-market report above
 
-python -m btc_edge backtest --days 7
+python -m btc_edge backtest --days 7             # calibration on Coinbase candles
+python -m btc_edge market-backtest --days 14     # the model vs REAL Kalshi quotes
 python -m btc_edge recalibrate --days 30 --save   # refit the Platt scaler
 python -m btc_edge vol-tails --days 30            # EWMA/GARCH/Student-t bake-off
 ```
+
+`market-backtest` is the command that answers the question. It pulls every
+settled window in the span from Kalshi's public API with its per-minute yes
+bid/ask (cached under `.kalshi_cache/`, so a re-run is instant), pairs each
+minute with the Coinbase bar that closed at the same instant, and replays the
+live betting rule net of Kalshi's fee. The first run over 14 days makes ~1,350
+requests and takes a few minutes.
 
 The paper log is `paper_trades.csv` in the working directory; the frozen
 recalibration is `recalibrator.json` (`a = 1.034`, `b = −0.025`, fit on 30,160
@@ -121,6 +129,10 @@ btc_edge/
   tails.py        standardised Student-t innovations (incomplete beta, no scipy)
   backtest.py     historical replay + the time-ordered recal fit/eval harness
   experiments.py  vol x tail bake-off scored on held-out windows
+  history.py      settled Kalshi windows + per-minute bid/ask, disk-cached
+  fees.py         Kalshi's quadratic taker fee, rounded up to the cent
+  market_backtest.py  the model vs real quotes: pairing, one bet per window,
+                  PnL net of fees, Brier vs the mid, block bootstrap
   report.py       edge_report(): model vs market over quoted+settled rows
   live/
     paperlog.py   the CSV schema and append
@@ -130,6 +142,8 @@ btc_edge/
 tests/
   test_golden_master.py   pins edge_report()/backtest() output against refactors
   test_vol_and_tails.py   the vol/tail experiment and its statistics
+  test_market_backtest.py fees, history parsing/caching, the pairing rule,
+                          bet selection, the report — all offline
   test_*.py               ~40 unit tests (converted from the original scripts)
   fixtures/               a frozen copy of the paper log for the golden master
 docs/

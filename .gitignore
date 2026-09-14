@@ -21,3 +21,5 @@ venv/
 
 # Backtest candle cache (re-fetched from Coinbase on demand)
 .candle_cache/
+# Kalshi settled-market + minute-candle cache (re-fetched on demand)
+.kalshi_cache/

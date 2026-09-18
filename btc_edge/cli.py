@@ -22,6 +22,7 @@ from typing import Optional
 from btc_edge.backtest import (
     backtest,
     fit_and_eval_recalibration,
+    load_candle_span_cached,
     load_candles_cached,
     print_backtest,
     print_recal_eval,
@@ -58,6 +59,13 @@ def one_shot(strike: float, minutes_left: float,
                recal=Recalibrator.load(RECAL_PATH))
     log_decision(d)
     print(json.dumps(asdict(d), indent=2))
+
+
+def _positive_int(s: str) -> int:
+    v = int(s)
+    if v < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return v
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -114,7 +122,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_mb.add_argument("--no-recal", action="store_true",
                       help="score the raw GBM probability instead of the "
                            "saved recalibration")
-    p_mb.add_argument("--n-boot", type=int, default=BOOTSTRAP_RESAMPLES)
+    p_mb.add_argument("--n-boot", type=_positive_int, default=BOOTSTRAP_RESAMPLES,
+                      help="block-bootstrap resamples for the Brier delta CI (>= 1)")
 
     p_rc = sub.add_parser("recalibrate",
                           help="fit the recalibrator on history, save it")
@@ -181,10 +190,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not history:
             print("no settled windows in that span")
             return 1
-        # spot must reach back one vol lookback before the first window
-        span_days = (history[-1].market.close_ts - history[0].market.open_ts
-                     + args.vol_lookback * 60) / 86400.0
-        candles = load_candles_cached(span_days + 0.05)
+        # Spot for exactly the windows loaded, reaching back one vol lookback
+        # before the first open — keyed on those bounds, not on the clock, so a
+        # re-run is a cache hit and a slow history load cannot shorten it.
+        candles = load_candle_span_cached(
+            history[0].market.open_ts - args.vol_lookback * 60,
+            history[-1].market.close_ts)
         recal = Recalibrator() if args.no_recal else Recalibrator.load(RECAL_PATH)
         r = run_market_backtest(history, candles, recal=recal,
                                 min_edge=args.min_edge, max_spread=args.max_spread,

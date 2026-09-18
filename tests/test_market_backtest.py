@@ -203,8 +203,8 @@ def test_pairing_uses_the_coinbase_bar_that_closed_at_the_candle_end():
     for s in samples:
         # Kalshi candle end T  <->  Coinbase bar ts = T-60 (which closes at T)
         assert s.price == by_ts[s.end_ts - 60]["close"]
-        assert s.price != by_ts[s.end_ts]["close"] or by_ts[s.end_ts]["close"] == s.price
         assert s.minutes_left == pytest.approx((CLOSE - s.end_ts) / 60)
+        assert s.raw_prob == s.model_prob          # no recalibrator supplied
     assert [s.minutes_left for s in samples] == sorted(
         [s.minutes_left for s in samples], reverse=True)
 
@@ -235,26 +235,44 @@ def test_pairing_drops_minutes_without_a_book_bar_or_vol_history():
     assert len(samples) == 11
     # too little spot history -> nothing at all, rather than a crash
     assert MB.pair_history(hist, _candles(OPEN - 3 * 60, 18)) == []
+    # ...and "too little" means short of the FULL vol lookback (minus a small
+    # tolerance), not merely the 20-close floor: 40 bars before the open must
+    # not price minute 1 off a 40-close sigma.
+    short = _candles(OPEN - 40 * 60, 60)
+    assert MB.pair_history(hist, short, vol_lookback=90) == []
+    assert len(MB.pair_history(hist, short, vol_lookback=40)) > 0
     # minutes at/after the close or at/before the open are never paired
     late = _history(quotes={0: (0.5, 0.49), 15: (0.5, 0.49), 16: (0.5, 0.49)})
     assert MB.pair_history(late, _candles(OPEN - 120 * 60, 140)) == []
 
 
-def test_pairing_applies_the_recalibrator_when_given():
+def test_pairing_applies_the_recalibrator_and_keeps_the_raw_prob():
     candles = _candles(OPEN - 120 * 60, 140)
     raw = MB.pair_history(_history(), candles)
     cal = MB.pair_history(_history(), candles, recal=E.Recalibrator(a=2.0, b=0.0, n_fit=1))
     for r, c in zip(raw, cal):
-        assert c.model_prob == pytest.approx(E.Recalibrator(a=2.0).apply(r.model_prob))
+        assert c.raw_prob == pytest.approx(r.raw_prob)      # raw survives for refits
+        assert c.model_prob == pytest.approx(E.Recalibrator(a=2.0).apply(r.raw_prob))
 
 
 # -------------------------------------------------------- bet selection --
 
 def _sample(ticker, minute, model, ask, bid, outcome_up):
-    return MB.PairedSample(ticker=ticker, window_ix=0, end_ts=OPEN + minute * 60,
+    return MB.PairedSample(ticker=ticker, end_ts=OPEN + minute * 60,
                            minutes_left=15 - minute, price=1.0, sigma=0.0005,
-                           model_prob=model, yes_ask=ask, yes_bid=bid,
+                           raw_prob=model, model_prob=model, yes_ask=ask, yes_bid=bid,
                            outcome_up=outcome_up)
+
+
+def test_choose_side_is_the_single_rule_live_and_replay_share():
+    from btc_edge.decision import choose_side
+    assert choose_side(0.58, 0.50, 0.51, 0.05) == ("UP", 0.50, pytest.approx(0.08))
+    assert choose_side(0.20, 0.31, 0.70, 0.05) == ("DOWN", 0.70, pytest.approx(0.10))
+    assert choose_side(0.52, 0.50, 0.51, 0.05) is None          # 2% is not 5%
+    assert choose_side(0.99, 1.00, 0.01, 0.05) is None          # cannot buy at 100c
+    # decide() goes through the same function: same side, same edge, same note
+    d = E.decide(65200, 64800, 5.0, 0.0006, E.Quote(up_cost_cents=20, down_cost_cents=82))
+    assert d.recommended_side == "UP" and d.edge_up == pytest.approx(d.model_prob_up - 0.20)
 
 
 def test_one_bet_per_window_at_the_first_minute_that_clears_the_edge():
@@ -293,12 +311,36 @@ def test_no_bet_when_the_edge_never_clears_and_fee_fn_is_pluggable():
 
 
 def test_pnl_stats_interval_and_significance():
-    assert MB.pnl_stats([1.0]) is None
-    st = MB.pnl_stats([10.0, 12.0, 11.0, 9.0, 13.0, 11.0])
-    assert st.n == 6 and st.hit_rate == 1.0 and st.mean == pytest.approx(11.0)
+    assert MB.pnl_stats([]) is None
+    st = MB.pnl_stats([10.0, 12.0, 11.0, 9.0, 13.0, 11.0] * 2)
+    assert st.n == 12 and st.hit_rate == 1.0 and st.mean == pytest.approx(11.0)
     assert st.ci95[0] > 0 and st.significant
     flat = MB.pnl_stats([50.0, -50.0] * 10)
     assert flat.mean == 0 and not flat.significant
+
+
+def test_pnl_stats_refuses_an_interval_below_the_minimum_n():
+    # Two identical wins used to yield a zero-width interval that read as
+    # "significant at 95%". Below MIN_N_FOR_CI there is no interval at all.
+    st = MB.pnl_stats([43.0, 43.0])
+    assert st.n == 2 and st.mean == 43.0 and st.ci95 is None
+    assert st.significant is False
+    assert MB.pnl_stats([43.0]).ci95 is None
+    line = MB._pnl_line("x", st)
+    assert "no interval" in line and "CI" not in line
+    assert MB.pnl_stats([43.0] * MB.MIN_N_FOR_CI).ci95 is not None
+
+
+def test_edge_bands_follow_the_threshold_actually_used():
+    assert [b[0] for b in MB.edge_bands(0.05)] == ["5%-10%", "10%-20%", "20%+"]
+    assert MB.edge_bands(0.05)[0][1] == 0.05
+    assert [b[0] for b in MB.edge_bands(0.02)] == ["2%-10%", "10%-20%", "20%+"]
+    assert [b[0] for b in MB.edge_bands(0.12)] == ["12%-20%", "20%+"]
+    assert [b[0] for b in MB.edge_bands(0.25)] == ["25%+"]
+    # a 3% bet under a 2% threshold lands in the first band, correctly labelled
+    b = MB.WindowBet("W", "UP", 10.0, 0.5, 0.03, True, 50.0, 2.0)
+    bands = MB._band([b] * MB.MIN_N_FOR_CI, lambda x: x.edge, MB.edge_bands(0.02))
+    assert list(bands) == ["2%-10%"]
 
 
 # ------------------------------------------------------------ end to end --
@@ -311,14 +353,16 @@ def _many_windows(n=40, seed=3):
     hist, candles = [], []
     t0 = OPEN - 200 * 60
     px = 65000.0
-    for i in range(n + 3):
+    # 8 windows (120 min) of price history before the first scored window, so
+    # every minute has the full 90-bar vol lookback behind it.
+    for i in range(n + 8):
         # 15 bars per window; a continuous price path across windows
         for k in range(15):
             px *= math.exp(rng.gauss(0, 0.0005))
             candles.append({"ts": t0 + (i * 15 + k) * 60, "open": px, "high": px,
                             "low": px, "close": px, "volume": 1.0})
     for w in range(n):
-        o = t0 + (w + 3) * 15 * 60
+        o = t0 + (w + 8) * 15 * 60
         c = o + 900
         strike = next(b["close"] for b in candles if b["ts"] == o - 60)
         settle = next(b["close"] for b in candles if b["ts"] == c - 60)
@@ -346,9 +390,22 @@ def test_run_market_backtest_end_to_end_is_consistent_and_deterministic():
     assert r.book_first_minute == [1.0] * 40
     r2 = MB.run_market_backtest(hist, candles, n_boot=300)
     assert r2.brier_all == r.brier_all and r2.net.ci95 == r.net.ci95
-    # bands partition the bets
-    assert sum(s.n for s in r.by_entry_band.values()) == len(r.bets) or \
-        all(s.n >= 2 for s in r.by_entry_band.values())
+    # every bet lands in exactly one entry band and one edge band
+    assert sum(s.n for s in r.by_entry_band.values()) == len(r.bets)
+    assert sum(s.n for s in r.by_edge_band.values()) == len(r.bets)
+    assert list(r.by_edge_band)[0].startswith("5%")
+
+
+def test_run_market_backtest_rejects_a_zero_bootstrap_instead_of_crashing_late():
+    hist, candles = _many_windows(n=5)
+    with pytest.raises(ValueError):
+        MB.run_market_backtest(hist, candles, n_boot=0)
+    # and the CLI refuses it before loading anything
+    from btc_edge.cli import _positive_int
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("0")
+    assert _positive_int("7") == 7
 
 
 def test_report_mentions_every_headline_and_never_claims_a_null_is_significant():
@@ -365,5 +422,63 @@ def test_report_mentions_every_headline_and_never_claims_a_null_is_significant()
 def test_report_survives_an_empty_result():
     r = MB.run_market_backtest([], [], n_boot=10)
     txt = MB.format_market_report(r)
-    assert "fewer than 2 bets" in txt
+    assert "(no bets)" in txt
     assert r.brier_all is None and r.bets == []
+
+
+# ------------------------------------------------- history robustness --
+
+def test_load_history_skips_a_window_whose_fetch_fails(tmp_path, monkeypatch):
+    day = 1_789_000_000 // 86400 * 86400
+    ms = [_market_dict(ticker=f"T{i}", close=_iso(day + 900 * (i + 1))) for i in range(3)]
+    (tmp_path / "settled").mkdir()
+    (tmp_path / "settled" / f"{E.KALSHI_BTC_SERIES}_{day}.json").write_text(json.dumps(ms))
+
+    def flaky(url, retries=3):
+        if "/markets?" in url:                      # an uncached neighbouring day
+            return {"markets": [], "cursor": ""}
+        if "T1" in url:
+            raise RuntimeError("request failed after 3 tries")
+        return {"candlesticks": [_candle(day + 60)]}
+    monkeypatch.setattr(H, "_get_json", flaky)
+    monkeypatch.setattr(H, "REQUEST_PAUSE", 0.0)
+    got = H.load_history(days=0.5, end_ts=day + 4000, cache_dir=tmp_path, verbose=False)
+    assert [h.market.ticker for h in got] == ["T0", "T2"]
+    # the failure was NOT cached as an empty window
+    assert not (tmp_path / "candles" / "T1.json").exists()
+    assert (tmp_path / "candles" / "T0.json").exists()
+
+
+def test_malformed_payloads_are_never_written_to_the_cache(tmp_path, monkeypatch):
+    sm = H.parse_settled_market(_market_dict())
+    monkeypatch.setattr(H, "_get_json", lambda url, retries=3: {"error": "gone"})
+    monkeypatch.setattr(H, "REQUEST_PAUSE", 0.0)
+    with pytest.raises(RuntimeError):
+        H.fetch_market_minutes(sm, cache_dir=tmp_path)
+    assert not (tmp_path / "candles" / f"{sm.ticker}.json").exists()
+    day = 1_789_000_000 // 86400 * 86400
+    with pytest.raises(RuntimeError):
+        H.fetch_settled_markets(day, day + 86400, cache_dir=tmp_path)
+    assert not (tmp_path / "settled" / f"{E.KALSHI_BTC_SERIES}_{day}.json").exists()
+    # a genuinely empty, well-formed response IS cached (no markets that day)
+    monkeypatch.setattr(H, "_get_json", lambda url, retries=3: {"markets": [], "cursor": ""})
+    assert H.fetch_settled_markets(day, day + 86400, cache_dir=tmp_path) == []
+    assert (tmp_path / "settled" / f"{E.KALSHI_BTC_SERIES}_{day}.json").exists()
+
+
+def test_candle_span_cache_is_keyed_on_the_span_not_the_clock(tmp_path, monkeypatch):
+    import sys
+    B = sys.modules["btc_edge.backtest"]      # the module, not the re-exported function
+    calls = []
+
+    def fake_range(start, end, granularity=60):
+        calls.append((start, end))
+        return [{"ts": start, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]
+    monkeypatch.setattr(B, "fetch_candle_range", fake_range)
+    a = B.load_candle_span_cached(1_789_000_100, 1_789_010_000, cache_dir=tmp_path)
+    b = B.load_candle_span_cached(1_789_000_900, 1_789_010_500, cache_dir=tmp_path)
+    assert a == b and len(calls) == 1               # same hour-snapped span: one fetch
+    B.load_candle_span_cached(1_789_000_100, 1_789_020_000, cache_dir=tmp_path)
+    assert len(calls) == 2                          # a different hour: a new fetch
+    assert calls[0][0] % 3600 == 0 and calls[0][1] % 3600 == 0
+    assert calls[0][0] <= 1_789_000_100 and calls[0][1] >= 1_789_010_000

@@ -28,26 +28,34 @@ from statistics import stdev
 from typing import Callable, Optional
 
 from btc_edge.calibration import Recalibrator
-from btc_edge.decision import MIN_EDGE
+from btc_edge.decision import MIN_EDGE, choose_side
 from btc_edge.fees import kalshi_fee_cents
 from btc_edge.history import MarketHistory
-from btc_edge.metrics import _brier, _calibration_report, block_bootstrap_brier_delta
-from btc_edge.model import MIN_CLOSES_FOR_VOL, prob_finish_above, realized_vol_per_minute
+from btc_edge.live.fill import _pnl_cents
+from btc_edge.metrics import _calibration_report
+from btc_edge.model import prob_finish_above, realized_vol_per_minute
+from btc_edge.report import _brier_level
 
 MAX_SPREAD = 0.05        # wider than 5c = no real two-sided book, skip the minute
 BOOTSTRAP_RESAMPLES = 4_000
 BOOTSTRAP_SEED = 20260914
+# Below this many bets a normal-approximation interval is not worth printing:
+# two identical wins give a zero-width "significant" interval.
+MIN_N_FOR_CI = 10
+# A minute needs (nearly) the full vol lookback behind it, as collect_samples
+# requires; a few missing Coinbase bars inside the lookback are tolerated.
+LOOKBACK_TOLERANCE = 5
 
 
 @dataclass(frozen=True)
 class PairedSample:
     """One minute of one window: what the model said, what the book said."""
     ticker: str
-    window_ix: int
     end_ts: int
     minutes_left: float
     price: float            # Coinbase close of the bar ending at end_ts
     sigma: float
+    raw_prob: float         # unrecalibrated GBM probability, kept for refits
     model_prob: float       # recalibrated if a recalibrator was supplied
     yes_ask: float          # dollars 0-1: cost of Up
     yes_bid: float
@@ -84,22 +92,27 @@ class PnlStats:
     hit_rate: float
     mean: float
     sd: float
-    ci95: tuple[float, float]
+    ci95: Optional[tuple[float, float]]   # None below MIN_N_FOR_CI
 
     @property
     def significant(self) -> bool:
+        if self.ci95 is None:
+            return False
         return self.ci95[0] > 0 or self.ci95[1] < 0
 
 
-def pnl_stats(values: list[float]) -> Optional[PnlStats]:
+def pnl_stats(values: list[float], min_n_for_ci: int = MIN_N_FOR_CI) -> Optional[PnlStats]:
     n = len(values)
-    if n < 2:
+    if n < 1:
         return None
     mean = sum(values) / n
-    sd = stdev(values)
-    se = sd / math.sqrt(n)
+    sd = stdev(values) if n >= 2 else 0.0
+    ci = None
+    if n >= min_n_for_ci:
+        se = sd / math.sqrt(n)
+        ci = (mean - 1.96 * se, mean + 1.96 * se)
     return PnlStats(n=n, hit_rate=sum(1 for v in values if v > 0) / n,
-                    mean=mean, sd=sd, ci95=(mean - 1.96 * se, mean + 1.96 * se))
+                    mean=mean, sd=sd, ci95=ci)
 
 
 @dataclass
@@ -138,14 +151,17 @@ def pair_history(
     Join each window's Kalshi minutes to the Coinbase bar that closed at the same
     instant, and price each with the model using only closes up to that bar.
     Minutes without a real two-sided book, without a matching Coinbase bar, or
-    without enough vol history are dropped.
+    without (nearly) the full `vol_lookback` of spot history are dropped —
+    the same lookback requirement `collect_samples` enforces, so a short
+    candle span cannot silently price the first windows off a stub sigma.
     """
     by_ts = {int(c["ts"]): c for c in candles}
     ts_sorted = sorted(by_ts)
     closes = [float(by_ts[t]["close"]) for t in ts_sorted]
+    need = max(2, vol_lookback - LOOKBACK_TOLERANCE)
 
     out: list[PairedSample] = []
-    for ix, h in enumerate(history):
+    for h in history:
         m = h.market
         for mm in h.minutes:
             T = mm.end_ts
@@ -159,7 +175,7 @@ def pair_history(
             hi = bisect_right(ts_sorted, T - 60)          # includes the bar itself
             lo = bisect_left(ts_sorted, T - 60 - vol_lookback * 60)
             hist = closes[lo:hi]
-            if len(hist) < MIN_CLOSES_FOR_VOL:
+            if len(hist) < need:
                 continue
             sigma = vol_fn(hist)
             price = float(bar["close"])
@@ -167,8 +183,8 @@ def pair_history(
             raw = prob_fn(price, m.strike, minutes_left, sigma)
             p = recal.apply(raw) if recal else raw
             out.append(PairedSample(
-                ticker=m.ticker, window_ix=ix, end_ts=T, minutes_left=minutes_left,
-                price=price, sigma=sigma, model_prob=p,
+                ticker=m.ticker, end_ts=T, minutes_left=minutes_left,
+                price=price, sigma=sigma, raw_prob=raw, model_prob=p,
                 yes_ask=mm.yes_ask, yes_bid=mm.yes_bid,
                 outcome_up=1 if m.outcome_up else 0))
     return out
@@ -194,15 +210,14 @@ def select_window_bets(samples: list[PairedSample],
     for ticker, rows in by_window.items():
         rows.sort(key=lambda s: s.end_ts)
         for s in rows:
-            side = cost = edge = None
-            if s.model_prob - s.yes_ask >= min_edge and s.yes_ask < 1.0:
-                side, cost, edge = "UP", s.yes_ask, s.model_prob - s.yes_ask
-            elif (1.0 - s.model_prob) - s.no_ask >= min_edge and s.no_ask < 1.0:
-                side, cost, edge = "DOWN", s.no_ask, (1.0 - s.model_prob) - s.no_ask
-            if side is None:
+            # Same rule object the live decide() uses, same PnL arithmetic the
+            # live fill uses — the replay cannot drift from the real thing.
+            pick = choose_side(s.model_prob, s.yes_ask, s.no_ask, min_edge)
+            if pick is None:
                 continue
+            side, cost, edge = pick
             won = (s.outcome_up == 1) if side == "UP" else (s.outcome_up == 0)
-            gross = (100.0 - cost * 100.0) if won else -cost * 100.0
+            gross = _pnl_cents(side, s.yes_ask, s.no_ask, bool(s.outcome_up))
             bets.append(WindowBet(ticker=ticker, side=side, minutes_left=s.minutes_left,
                                   cost=cost, edge=edge, won=won, gross_cents=gross,
                                   fee_cents=fee_fn(cost * 100.0)))
@@ -212,9 +227,20 @@ def select_window_bets(samples: list[PairedSample],
 
 # ---------------------------------------------------------------- scoring --
 
-EDGE_BANDS = (("5-10%", 0.0, 0.10), ("10-20%", 0.10, 0.20), ("20%+", 0.20, 9.0))
 ENTRY_BANDS = (("T-10..15m", 10.0, 15.0), ("T-5..10m", 5.0, 10.0),
                ("T-2..5m", 2.0, 5.0), ("T-0..2m", 0.0, 2.0))
+
+
+def edge_bands(min_edge: float) -> tuple[tuple[str, float, float], ...]:
+    """Edge bands whose first bucket starts at the threshold actually used."""
+    cuts = [c for c in (0.10, 0.20) if c > min_edge]
+    bands = []
+    lo = min_edge
+    for c in cuts:
+        bands.append((f"{lo:.0%}-{c:.0%}", lo, c))
+        lo = c
+    bands.append((f"{lo:.0%}+", lo, 9.0))
+    return tuple(bands)
 
 
 def _band(bets: list[WindowBet], key: Callable[[WindowBet], float],
@@ -261,20 +287,10 @@ def run_market_backtest(
         if s.ticker not in first_min or s.end_ts < first_min[s.ticker].end_ts:
             first_min[s.ticker] = s
 
-    def level(blocks):
-        if not blocks:
-            return None
-        flat = [t for b in blocks for t in b]
-        bs = block_bootstrap_brier_delta(blocks, n_resamples=n_boot, seed=seed)
-        outcomes = [t[2] for t in flat]
-        return {"windows": bs["n_blocks"], "samples": len(flat),
-                "model": _brier([t[0] for t in flat], outcomes),
-                "market": _brier([t[1] for t in flat], outcomes),
-                "delta": bs["delta"], "ci95": (bs["lo"], bs["hi"]),
-                "p_model_better": bs["p_model_better"]}
-
-    brier_all = level(list(by_window.values()))
-    brier_first = level([[(s.model_prob, s.mid, s.outcome_up)] for s in first_min.values()])
+    brier_all = _brier_level(list(by_window.values()), n_resamples=n_boot, seed=seed)
+    brier_first = _brier_level([[(s.model_prob, s.mid, s.outcome_up)]
+                                for s in first_min.values()],
+                               n_resamples=n_boot, seed=seed)
 
     outcomes = [s.outcome_up for s in samples]
     return MarketBacktestResult(
@@ -287,7 +303,7 @@ def run_market_backtest(
         bets=bets,
         gross=pnl_stats([b.gross_cents for b in bets]),
         net=pnl_stats([b.net_cents for b in bets]),
-        by_edge_band=_band(bets, lambda b: b.edge, EDGE_BANDS),
+        by_edge_band=_band(bets, lambda b: b.edge, edge_bands(min_edge)),
         by_entry_band=_band(bets, lambda b: b.minutes_left, ENTRY_BANDS),
         brier_all=brier_all,
         brier_first=brier_first,
@@ -304,10 +320,13 @@ def run_market_backtest(
 
 def _pnl_line(label: str, st: Optional[PnlStats]) -> str:
     if st is None:
-        return f"  {label:<12} (fewer than 2 bets)"
+        return f"  {label:<12} (no bets)"
+    head = (f"  {label:<12} n={st.n:5d}  hit {st.hit_rate:5.1%}  "
+            f"mean {st.mean:+6.2f}c/bet")
+    if st.ci95 is None:
+        return head + f"   (n < {MIN_N_FOR_CI}: no interval)"
     lo, hi = st.ci95
-    return (f"  {label:<12} n={st.n:5d}  hit {st.hit_rate:5.1%}  "
-            f"mean {st.mean:+6.2f}c/bet   95% CI [{lo:+6.2f}, {hi:+6.2f}]")
+    return head + f"   95% CI [{lo:+6.2f}, {hi:+6.2f}]"
 
 
 def format_market_report(r: MarketBacktestResult) -> str:
@@ -328,12 +347,14 @@ def format_market_report(r: MarketBacktestResult) -> str:
              "model cleared the threshold, held to settlement:")
     L.append(_pnl_line("gross", r.gross))
     L.append(_pnl_line("net of fee", r.net))
-    if r.net is not None:
+    if r.net is not None and r.net.ci95 is not None:
         if r.net.significant:
             d = "POSITIVE" if r.net.ci95[0] > 0 else "NEGATIVE"
             L.append(f"  -> {d} net edge, significant at 95%")
         else:
             L.append("  -> net of fees the interval straddles zero: no demonstrated edge")
+    elif r.net is not None:
+        L.append(f"  -> fewer than {MIN_N_FOR_CI} bets: no verdict")
     if r.by_edge_band:
         L.append("  by perceived edge at entry (net):")
         for k, st in r.by_edge_band.items():

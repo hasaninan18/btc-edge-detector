@@ -11,12 +11,12 @@ not a point price. A one-parameter Platt recalibrator, fit once on historical
 backtest data and then frozen, corrects a small under-dispersion in the raw
 model. Everything is logged; nothing places an order.
 
-## Current result — the market beats the model, on 5,686 real windows
+## Current result — the market beats the model, on 5,678 real windows
 
 Kalshi's public API serves every settled window with its result and strike,
 and one candle per minute with the yes bid/ask, going back 60+ days at 96
 windows a day. `market-backtest` replays the model against those real quotes.
-Run on **2026-09-14** over the 60 days to that date (2026-07-16 → 09-14):
+Run on **2026-09-18** over the 60 days to that date (2026-07-20 → 09-18):
 
 ```
 python -m btc_edge market-backtest --days 60
@@ -24,8 +24,8 @@ python -m btc_edge market-backtest --days 60
 
 | | windows | paired minutes |
 |---|---:|---:|
-| settled windows in span | 5,686 | 76,558 |
-| windows with a two-sided book | 5,680 (book forms at +1m in every window) | |
+| settled windows in span | 5,678 | 76,512 |
+| windows with a two-sided book | 5,672 (book forms at +1m in every window) | |
 
 One bet per window, at the ask, on the first minute the model's probability
 beat the ask by 5%, held to settlement. Kalshi's fee (7% × P × (1−P) per
@@ -33,12 +33,12 @@ contract, rounded up to the cent, ≈2c at these prices) is charged on entry:
 
 | window-level PnL | bets | hit rate | mean / bet | 95% CI |
 |---|---:|---:|---:|---|
-| gross | 4,897 | 47.1% | +0.74c | [−0.53c, +2.00c] |
-| **net of fee** | 4,897 | 47.1% | **−1.14c** | **[−2.41c, +0.12c]** |
-| net, edge 5–10% at entry | 4,282 | 46.4% | −1.02c | [−2.37c, +0.32c] |
-| net, edge 10–20% at entry | 593 | 51.4% | −2.65c | [−6.39c, +1.10c] |
-| net, entered T-10..15m | 3,444 | 52.3% | −1.32c | [−2.87c, +0.24c] |
-| net, entered T-2..5m | 340 | 24.7% | −1.72c | [−5.79c, +2.35c] |
+| gross | 4,852 | 47.5% | +0.71c | [−0.55c, +1.98c] |
+| **net of fee** | 4,852 | 47.5% | **−1.16c** | **[−2.43c, +0.10c]** |
+| net, edge 5–10% at entry | 4,251 | 46.8% | −1.00c | [−2.34c, +0.35c] |
+| net, edge 10–20% at entry | 579 | 52.2% | −2.82c | [−6.59c, +0.94c] |
+| net, entered T-10..15m | 3,357 | 52.9% | −1.21c | [−2.78c, +0.36c] |
+| net, entered T-2..5m | 358 | 27.4% | −1.33c | [−5.34c, +2.68c] |
 
 Even gross of fees the model does not make money on 60 days; net of fees it
 loses about a cent a contract, and the interval only just reaches zero. The
@@ -50,8 +50,8 @@ the ask would charge it half a spread on every row):
 
 | Brier, model − market mid | windows | samples | model | market | delta | 95% CI (block bootstrap) |
 |---|---:|---:|---:|---:|---:|---|
-| first quoted minute per window | 5,680 | 5,680 | 0.2387 | 0.2358 | +0.0028 | [+0.0014, +0.0043] |
-| all paired minutes (correlated) | 5,680 | 76,558 | 0.1612 | 0.1562 | +0.0050 | [+0.0037, +0.0063] |
+| first quoted minute per window | 5,672 | 5,672 | 0.2385 | 0.2358 | +0.0027 | [+0.0013, +0.0040] |
+| all paired minutes (correlated) | 5,672 | 76,512 | 0.1610 | 0.1565 | +0.0045 | [+0.0033, +0.0057] |
 
 **The market is the better forecaster at 95% on both levels**, and the model
 scored better in 0 of 4,000 bootstrap resamples. Per-decile calibration shows
@@ -62,10 +62,12 @@ is missing something persistent that the book prices in — short-horizon
 momentum, order flow, or the index the contract actually settles on.
 
 A note on sample size, since this project has been burned by it before: the
-same command over only the last 14 days gives net **+1.44c/bet on 1,120
-bets, CI [−1.20c, +4.08c]**, and a per-minute Brier delta the model nearly
-wins. Two weeks of real quotes still looked like a coin flip in the model's
-favour. Sixty weeks would not have been needed; sixty days settled it.
+same command over only the 14 days to 2026-09-14 gave net **+1.44c/bet on
+1,120 bets, CI [−1.20c, +4.08c]**, and a per-minute Brier delta the model
+nearly won. Two weeks of real quotes still looked like a coin flip in the
+model's favour. Sixty days settled it, and a re-run four days later on the
+rolled-forward span (the table above) moved nothing by more than a few
+hundredths of a cent.
 
 Two things about the replay that are deliberate:
 
@@ -89,7 +91,7 @@ trade tape is busiest.
 
 This was the evidence before `market-backtest` existed. It is kept because it
 is what the `edge` command still reports on, and because it shows how a
-32-sample point estimate of +14.5c/bet dissolves at n=4,897.
+32-sample point estimate of +14.5c/bet dissolves at n=4,852.
 
 Live quote capture ran from **2026-08-12 to 2026-08-13**, producing 217 paper
 samples, of which **204 had both a market quote and a settled outcome**, across
@@ -280,13 +282,19 @@ Transaction costs: entries are charged the ask (`yes_ask` / `no_ask`, see
 +14.5c/window figure is net of the spread.
 
 A third measurement change is the one that settles it: `market-backtest`
-(above) scores the model against real quotes on 5,686 windows, net of fees,
+(above) scores the model against real quotes on 5,678 windows, net of fees,
 and finds the market is significantly better. Live capture is no longer the
 bottleneck and no longer the evidence; its remaining job is to check that
 live fills look like the historical asks.
 
 Known open work:
 
+- [#2](https://github.com/hasaninan18/btc-edge-detector/issues/2):
+  `collect_samples` prices bar *t* with a close only known at *t+60* — a
+  one-minute look-ahead in the replay the recalibrator was fit on. The
+  real-quote replay above is aligned correctly; the misalignment reaches it
+  only through the Platt slope (a = 1.034). Fixing it moves the golden-master
+  numbers, so it gets its own PR.
 - re-run `market-backtest --days 60` a month from now, ideally across a
   falling regime, to see whether the model's Up-side miss is drift or
   something structural

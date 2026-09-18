@@ -18,7 +18,7 @@ Only the parts of the response this package uses are kept, in dollars-as-floats
 """
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -148,9 +148,13 @@ def fetch_settled_markets(start_ts: float, end_ts: float,
                        f"&limit=200&min_close_ts={day}&max_close_ts={day_end}"
                        + (f"&cursor={cursor}" if cursor else ""))
                 data = _get_json(url)
-                page = data.get("markets", []) if isinstance(data, dict) else []
+                # A 2xx body without the expected key is a schema change or an
+                # error page, not an empty day. Never freeze that to disk.
+                if not isinstance(data, dict) or "markets" not in data:
+                    raise RuntimeError(f"unexpected settled-markets payload: {url}")
+                page = data["markets"] or []
                 raw.extend(page)
-                cursor = data.get("cursor") if isinstance(data, dict) else None
+                cursor = data.get("cursor")
                 if not cursor or not page:
                     break
                 time.sleep(REQUEST_PAUSE)
@@ -185,7 +189,11 @@ def fetch_market_minutes(market: SettledMarket,
                f"?start_ts={market.open_ts - 60}&end_ts={market.close_ts + 60}"
                f"&period_interval=1")
         data = _get_json(url)
-        raw = data.get("candlesticks", []) if isinstance(data, dict) else []
+        if not isinstance(data, dict) or "candlesticks" not in data:
+            # Do not cache: an empty list on disk would be indistinguishable
+            # from a genuinely quiet window on every future run.
+            raise RuntimeError(f"unexpected candlesticks payload: {url}")
+        raw = data["candlesticks"] or []
         cache.write_text(json.dumps(raw))
         time.sleep(REQUEST_PAUSE)
     minutes = [mm for mm in (parse_candle(c) for c in raw) if mm is not None]
@@ -219,15 +227,19 @@ def load_history(days: float, end_ts: Optional[float] = None,
               f"{datetime.fromtimestamp(end_ts, tz=timezone.utc):%Y-%m-%d}; "
               f"loading minute candles (cached after first run)...")
     out: list[MarketHistory] = []
+    failed: list[str] = []
     for i, m in enumerate(markets):
-        out.append(MarketHistory(m, fetch_market_minutes(m, series=series,
-                                                         cache_dir=cache_dir)))
+        try:
+            minutes = fetch_market_minutes(m, series=series, cache_dir=cache_dir)
+        except Exception as e:   # noqa: BLE001 - one bad ticker must not kill 5,000
+            failed.append(m.ticker)
+            if verbose:
+                print(f"  ! {m.ticker}: {e}; skipping")
+            continue
+        out.append(MarketHistory(m, minutes))
         if verbose and i and i % 200 == 0:
             print(f"  ...{i}/{len(markets)}")
+    if failed and verbose:
+        print(f"  {len(failed)} window(s) skipped after fetch failures "
+              f"(not cached; re-run to retry)")
     return out
-
-
-def history_to_dicts(hist: list[MarketHistory]) -> list[dict]:
-    """Plain-dict form, for dumping to JSON."""
-    return [{"market": asdict(h.market), "minutes": [asdict(mm) for mm in h.minutes]}
-            for h in hist]

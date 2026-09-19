@@ -52,6 +52,26 @@ def load_candles_cached(days: float, cache_dir: Path = Path(".candle_cache")) ->
     return rows
 
 
+def load_candle_span_cached(start_ts: float, end_ts: float,
+                            cache_dir: Path = Path(".candle_cache")) -> list[dict]:
+    """
+    Fetch (and cache) 1-min candles for an explicit [start_ts, end_ts] span.
+    Bounds are snapped outward to the hour so a re-run over the same windows
+    hits the same file instead of re-downloading because the clock moved.
+    """
+    cache_dir.mkdir(exist_ok=True)
+    start = int(start_ts // 3600) * 3600
+    end = int(-(-end_ts // 3600)) * 3600
+    cache = cache_dir / f"btc_1m_span_{start}_{end}.json"
+    if cache.exists():
+        return json.loads(cache.read_text())
+    print(f"fetching {(end - start) / 86400:.1f} day(s) of 1-min candles "
+          f"(~{(end - start) // 60} bars)...")
+    rows = fetch_candle_range(start, end)
+    cache.write_text(json.dumps(rows))
+    return rows
+
+
 @dataclass
 class Sample:
     raw_prob_up: float

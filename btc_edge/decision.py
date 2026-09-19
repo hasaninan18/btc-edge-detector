@@ -41,6 +41,25 @@ MIN_EDGE = 0.05   # require 5%+ edge before considering a bet
 KELLY_CAP = 0.02  # never risk more than 2% of bankroll per contract
 
 
+def choose_side(p_up: float, up_cost: float, down_cost: float,
+                min_edge: float = MIN_EDGE) -> Optional[tuple[str, float, float]]:
+    """
+    THE betting rule, in one place. Costs are in dollars (0-1). Returns
+    (side, cost, edge) for the first side whose model probability beats its
+    ask by `min_edge`, Up checked first, or None.
+
+    Both the live `decide()` and the historical `market_backtest` replay call
+    this, so a rule change (a minutes-left floor, a max price, a staleness
+    check) lands in both by construction rather than by hand-copy.
+    """
+    if p_up - up_cost >= min_edge and up_cost < 1.0:
+        return "UP", up_cost, p_up - up_cost
+    p_down = 1.0 - p_up
+    if p_down - down_cost >= min_edge and down_cost < 1.0:
+        return "DOWN", down_cost, p_down - down_cost
+    return None
+
+
 def decide(
     price: float,
     strike: float,
@@ -76,14 +95,12 @@ def decide(
         note = "no edge"
 
         # Kelly for a bet costing c that pays $1: f* = (p - c) / (1 - c)
-        if edge_up >= MIN_EDGE and market_up < 1.0:
-            side = "UP"
-            kelly = (p_up - market_up) / (1.0 - market_up)
-            note = f"model {p_up:.1%} vs market {market_up:.1%}"
-        elif edge_down >= MIN_EDGE and market_down < 1.0:
-            side = "DOWN"
-            kelly = (p_down - market_down) / (1.0 - market_down)
-            note = f"model {p_down:.1%} vs market {market_down:.1%}"
+        pick = choose_side(p_up, market_up, market_down, MIN_EDGE)
+        if pick is not None:
+            side, cost, edge = pick
+            p_side = p_up if side == "UP" else p_down
+            kelly = edge / (1.0 - cost)
+            note = f"model {p_side:.1%} vs market {cost:.1%}"
 
     # Fractional Kelly (0.25x) and hard cap
     kelly = max(0.0, min(kelly * 0.25, KELLY_CAP))

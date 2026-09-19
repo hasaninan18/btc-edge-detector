@@ -49,19 +49,21 @@ def _triple(row: dict) -> tuple[float, float, int]:
             int(row["outcome_up"]))
 
 
-def _brier_level(blocks: list[list[tuple[float, float, int]]]) -> Optional[dict]:
+def _brier_level(blocks: list[list[tuple[float, float, int]]],
+                 n_resamples: int = BOOTSTRAP_RESAMPLES,
+                 seed: int = BOOTSTRAP_SEED) -> Optional[dict]:
     """Model/market Brier plus the paired delta and its block-bootstrap CI.
 
     One `block` per independent unit (a window). Resampling happens at block
     granularity, so this is correct whether a block holds one row (window-level)
-    or all ~45 of a window's samples (the sample-level diagnostic).
+    or all ~45 of a window's samples (the sample-level diagnostic). Shared with
+    `market_backtest`, which passes its own resample count and seed.
     """
     flat = [t for b in blocks if b for t in b]
     if not flat:
         return None
     outcomes = [t[2] for t in flat]
-    bs = block_bootstrap_brier_delta(blocks, n_resamples=BOOTSTRAP_RESAMPLES,
-                                     seed=BOOTSTRAP_SEED)
+    bs = block_bootstrap_brier_delta(blocks, n_resamples=n_resamples, seed=seed)
     return {
         "windows": bs["n_blocks"],
         "samples": len(flat),

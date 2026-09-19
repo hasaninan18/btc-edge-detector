@@ -11,7 +11,87 @@ not a point price. A one-parameter Platt recalibrator, fit once on historical
 backtest data and then frozen, corrects a small under-dispersion in the raw
 model. Everything is logged; nothing places an order.
 
-## Current result — no demonstrated edge
+## Current result — the market beats the model, on 5,678 real windows
+
+Kalshi's public API serves every settled window with its result and strike,
+and one candle per minute with the yes bid/ask, going back 60+ days at 96
+windows a day. `market-backtest` replays the model against those real quotes.
+Run on **2026-09-18** over the 60 days to that date (2026-07-20 → 09-18):
+
+```
+python -m btc_edge market-backtest --days 60
+```
+
+| | windows | paired minutes |
+|---|---:|---:|
+| settled windows in span | 5,678 | 76,512 |
+| windows with a two-sided book | 5,672 (book forms at +1m in every window) | |
+
+One bet per window, at the ask, on the first minute the model's probability
+beat the ask by 5%, held to settlement. Kalshi's fee (7% × P × (1−P) per
+contract, rounded up to the cent, ≈2c at these prices) is charged on entry:
+
+| window-level PnL | bets | hit rate | mean / bet | 95% CI |
+|---|---:|---:|---:|---|
+| gross | 4,852 | 47.5% | +0.71c | [−0.55c, +1.98c] |
+| **net of fee** | 4,852 | 47.5% | **−1.16c** | **[−2.43c, +0.10c]** |
+| net, edge 5–10% at entry | 4,251 | 46.8% | −1.00c | [−2.34c, +0.35c] |
+| net, edge 10–20% at entry | 579 | 52.2% | −2.82c | [−6.59c, +0.94c] |
+| net, entered T-10..15m | 3,357 | 52.9% | −1.21c | [−2.78c, +0.36c] |
+| net, entered T-2..5m | 358 | 27.4% | −1.33c | [−5.34c, +2.68c] |
+
+Even gross of fees the model does not make money on 60 days; net of fees it
+loses about a cent a contract, and the interval only just reaches zero. The
+larger the model thought its edge was, the worse it did, with the exception
+of 22 bets at 20%+ that are too few to read.
+
+Scoring is unambiguous. The market is scored at its **mid** (scoring it at
+the ask would charge it half a spread on every row):
+
+| Brier, model − market mid | windows | samples | model | market | delta | 95% CI (block bootstrap) |
+|---|---:|---:|---:|---:|---:|---|
+| first quoted minute per window | 5,672 | 5,672 | 0.2385 | 0.2358 | +0.0027 | [+0.0013, +0.0040] |
+| all paired minutes (correlated) | 5,672 | 76,512 | 0.1610 | 0.1565 | +0.0045 | [+0.0033, +0.0057] |
+
+**The market is the better forecaster at 95% on both levels**, and the model
+scored better in 0 of 4,000 bootstrap resamples. Per-decile calibration shows
+the mechanism: the market mid is within 2 points of realised frequency in
+every decile, while the model realises 2–7 points *more Up* than it predicts
+in every decile but the top one. A driftless random walk from Coinbase spot
+is missing something persistent that the book prices in — short-horizon
+momentum, order flow, or the index the contract actually settles on.
+
+A note on sample size, since this project has been burned by it before: the
+same command over only the 14 days to 2026-09-14 gave net **+1.44c/bet on
+1,120 bets, CI [−1.20c, +4.08c]**, and a per-minute Brier delta the model
+nearly won. Two weeks of real quotes still looked like a coin flip in the
+model's favour. Sixty days settled it, and a re-run four days later on the
+rolled-forward span (the table above) moved nothing by more than a few
+hundredths of a cent.
+
+Two things about the replay that are deliberate:
+
+- **Spot is never fresher than the quote.** A Kalshi candle ending at T is
+  paired with the Coinbase bar that closed at T, so any staleness works
+  against the model, not for it.
+- **The threshold is not a filter.** The 5% edge fires in 84% of windows at
+  around T-11m, because a driftless GBM disagrees with the book by 5% almost
+  always at that horizon. That is a fact about the model's noise, not about
+  opportunity.
+
+Threats: one 60-day span in a rising market (BTC ran from ~$63k to ~$78k; the
+model's uniform Up-side miss is consistent with that, and a falling regime
+could flip its sign without changing the conclusion that the book prices it
+and the model does not); the Coinbase-to-BRTI basis measured −0.5bp over
+these windows, negligible against a 16bp typical 15-minute move; the
+last-minute approximation in `effective_tau` is coarse exactly where the
+trade tape is busiest.
+
+## The live-capture run (August 2026) — superseded
+
+This was the evidence before `market-backtest` existed. It is kept because it
+is what the `edge` command still reports on, and because it shows how a
+32-sample point estimate of +14.5c/bet dissolves at n=4,852.
 
 Live quote capture ran from **2026-08-12 to 2026-08-13**, producing 217 paper
 samples, of which **204 had both a market quote and a settled outcome**, across
@@ -98,10 +178,18 @@ python -m btc_edge fill        # backfill outcomes / PnL for expired windows
 python -m btc_edge summary     # calibration + PnL over everything settled
 python -m btc_edge edge        # the model-vs-market report above
 
-python -m btc_edge backtest --days 7
+python -m btc_edge backtest --days 7             # calibration on Coinbase candles
+python -m btc_edge market-backtest --days 14     # the model vs REAL Kalshi quotes
 python -m btc_edge recalibrate --days 30 --save   # refit the Platt scaler
 python -m btc_edge vol-tails --days 30            # EWMA/GARCH/Student-t bake-off
 ```
+
+`market-backtest` is the command that answers the question. It pulls every
+settled window in the span from Kalshi's public API with its per-minute yes
+bid/ask (cached under `.kalshi_cache/`, so a re-run is instant), pairs each
+minute with the Coinbase bar that closed at the same instant, and replays the
+live betting rule net of Kalshi's fee. The first run over 14 days makes ~1,350
+requests and takes a few minutes.
 
 The paper log is `paper_trades.csv` in the working directory; the frozen
 recalibration is `recalibrator.json` (`a = 1.034`, `b = −0.025`, fit on 30,160
@@ -121,6 +209,10 @@ btc_edge/
   tails.py        standardised Student-t innovations (incomplete beta, no scipy)
   backtest.py     historical replay + the time-ordered recal fit/eval harness
   experiments.py  vol x tail bake-off scored on held-out windows
+  history.py      settled Kalshi windows + per-minute bid/ask, disk-cached
+  fees.py         Kalshi's quadratic taker fee, rounded up to the cent
+  market_backtest.py  the model vs real quotes: pairing, one bet per window,
+                  PnL net of fees, Brier vs the mid, block bootstrap
   report.py       edge_report(): model vs market over quoted+settled rows
   live/
     paperlog.py   the CSV schema and append
@@ -130,6 +222,8 @@ btc_edge/
 tests/
   test_golden_master.py   pins edge_report()/backtest() output against refactors
   test_vol_and_tails.py   the vol/tail experiment and its statistics
+  test_market_backtest.py fees, history parsing/caching, the pairing rule,
+                          bet selection, the report — all offline
   test_*.py               ~40 unit tests (converted from the original scripts)
   fixtures/               a frozen copy of the paper log for the golden master
 docs/
@@ -187,8 +281,26 @@ Transaction costs: entries are charged the ask (`yes_ask` / `no_ask`, see
 `btc_edge/data.py`) and contracts settle at 0/100 with no exit trade, so the
 +14.5c/window figure is net of the spread.
 
+A third measurement change is the one that settles it: `market-backtest`
+(above) scores the model against real quotes on 5,678 windows, net of fees,
+and finds the market is significantly better. Live capture is no longer the
+bottleneck and no longer the evidence; its remaining job is to check that
+live fills look like the historical asks.
+
 Known open work:
 
-- more live window-bets — the window-level PnL CI still straddles zero at n=32
-- quote staleness is instrumented for new rows but unmeasured on the existing
-  204, so the window-level PnL above remains an upper bound
+- [#2](https://github.com/hasaninan18/btc-edge-detector/issues/2):
+  `collect_samples` prices bar *t* with a close only known at *t+60* — a
+  one-minute look-ahead in the replay the recalibrator was fit on. The
+  real-quote replay above is aligned correctly; the misalignment reaches it
+  only through the Platt slope (a = 1.034). Fixing it moves the golden-master
+  numbers, so it gets its own PR.
+- re-run `market-backtest --days 60` a month from now, ideally across a
+  falling regime, to see whether the model's Up-side miss is drift or
+  something structural
+- the `edge` command still scores the market at its ask; move it to the mid
+  and charge fees, so the live and historical reports agree by construction
+- if any edge is worth chasing it is in the final two minutes, where the trade
+  tape shows nearly all volume: a real-time replica of the 60-second BRTI
+  settlement average, rather than a 1-minute Coinbase close, is the model that
+  could have information the book does not

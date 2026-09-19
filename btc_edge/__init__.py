@@ -16,6 +16,9 @@ The package is a straight decomposition of what was one 1,500-line file:
     tails        Student-t innovations as an alternative to the Gaussian tail
     backtest     historical replay + the time-ordered recal harness
     experiments  vol x tail bake-off, scored on held-out windows
+    history      settled Kalshi windows + per-minute bid/ask, disk-cached
+    fees         Kalshi's quadratic taker fee
+    market_backtest  the model vs REAL quotes over settled history
     report       edge_report(): model-vs-market over quoted+settled rows
     live         paper log, outcome fill, and the watch/capture loops
     cli          `python -m btc_edge ...`
@@ -30,6 +33,7 @@ from btc_edge.backtest import (
     backtest,
     collect_samples,
     fit_and_eval_recalibration,
+    load_candle_span_cached,
     load_candles_cached,
     print_backtest,
     print_recal_eval,
@@ -58,7 +62,7 @@ from btc_edge.data import (
     fetch_recent_1min_candles,
     kalshi_quote_fn,
 )
-from btc_edge.decision import KELLY_CAP, MIN_EDGE, Decision, decide
+from btc_edge.decision import KELLY_CAP, MIN_EDGE, Decision, choose_side, decide
 from btc_edge.metrics import (
     _brier,
     _calibration_report,
@@ -85,6 +89,33 @@ from btc_edge.experiments import (
     format_report,
     print_report,
     run_experiment,
+)
+from btc_edge.fees import KALSHI_FEE_RATE, kalshi_fee_cents
+from btc_edge.history import (
+    CACHE_DIR,
+    MarketHistory,
+    MarketMinute,
+    SettledMarket,
+    fetch_market_minutes,
+    fetch_settled_markets,
+    load_history,
+    parse_candle,
+    parse_settled_market,
+)
+from btc_edge.market_backtest import (
+    MAX_SPREAD,
+    MIN_N_FOR_CI,
+    MarketBacktestResult,
+    PairedSample,
+    PnlStats,
+    WindowBet,
+    edge_bands,
+    format_market_report,
+    pair_history,
+    pnl_stats,
+    print_market_report,
+    run_market_backtest,
+    select_window_bets,
 )
 from btc_edge.report import edge_report
 from btc_edge.tails import (
@@ -131,14 +162,14 @@ __all__ = [
     # calibration
     "Recalibrator", "fit_recalibrator", "RECAL_PATH", "_logit", "_sigmoid",
     # decision
-    "Decision", "decide", "MIN_EDGE", "KELLY_CAP",
+    "Decision", "decide", "choose_side", "MIN_EDGE", "KELLY_CAP",
     # metrics
     "_brier", "_log_loss", "_calibration_report",
     "brier_delta", "block_bootstrap_brier_delta",
     # backtest
     "Sample", "BacktestResult", "RecalEval", "collect_samples", "score_samples",
     "backtest", "fit_and_eval_recalibration", "load_candles_cached",
-    "vig_market", "print_backtest", "print_recal_eval",
+    "load_candle_span_cached", "vig_market", "print_backtest", "print_recal_eval",
     # vol
     "ewma_vol_per_minute", "ewma_vol_factory", "GarchVol", "Garch11",
     "fit_garch11", "log_returns", "DEFAULT_LAMBDA",
@@ -151,6 +182,15 @@ __all__ = [
     "format_report", "print_report",
     # report
     "edge_report",
+    # history / fees / market backtest
+    "SettledMarket", "MarketMinute", "MarketHistory", "CACHE_DIR",
+    "parse_settled_market", "parse_candle", "fetch_settled_markets",
+    "fetch_market_minutes", "load_history",
+    "KALSHI_FEE_RATE", "kalshi_fee_cents",
+    "PairedSample", "WindowBet", "PnlStats", "MarketBacktestResult", "MAX_SPREAD",
+    "MIN_N_FOR_CI", "edge_bands",
+    "pair_history", "select_window_bets", "pnl_stats", "run_market_backtest",
+    "format_market_report", "print_market_report",
     # live
     "LOG_PATH", "CSV_FIELDS", "OUTCOME_FIELDS", "log_decision",
     "settlement_price", "_pnl_cents", "fill_outcomes", "log_summary",

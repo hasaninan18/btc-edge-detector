@@ -8,8 +8,10 @@ The model is deliberately plain — geometric Brownian motion with zero drift,
 realized 1-minute volatility, and a closed-form `P(settle > strike)` — adjusted
 for the fact that these contracts settle on a **60-second BRTI time-average**,
 not a point price. A one-parameter Platt recalibrator, fit once on historical
-backtest data and then frozen, corrects a small under-dispersion in the raw
-model. Everything is logged; nothing places an order.
+backtest data and then frozen, sits in front of the raw model — but its
+apparent benefit is a data-alignment artifact, not a real correction (see
+issue #2 and the note below). Removing it entirely does not change the
+headline result. Everything is logged; nothing places an order.
 
 ## Current result — the market beats the model, on 5,678 real windows
 
@@ -193,7 +195,13 @@ requests and takes a few minutes.
 
 The paper log is `paper_trades.csv` in the working directory; the frozen
 recalibration is `recalibrator.json` (`a = 1.034`, `b = −0.025`, fit on 30,160
-backtest samples — barely sharpening, kept only because it does not hurt
+backtest samples — barely sharpening, and now known to be an artifact: the
+training replay it was fit on has a one-minute look-ahead (issue #2). Refit
+with the alignment corrected the slope is a ≈ 0.99, i.e. essentially the
+identity, so the "under-dispersion" it appeared to correct was the model
+having already seen a minute of the move. Re-running the 60-day backtest with
+`--no-recal` moves net PnL by 0.01c and leaves every conclusion intact. Kept
+only because it does not hurt
 held-out log-loss).
 
 ## Layout

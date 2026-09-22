@@ -1,9 +1,18 @@
 """Probability recalibration — a one-parameter Platt scaling in logit space.
 
-The 30-day backtest showed the raw GBM model is slightly *under-dispersed*:
-reality is more decisive than a driftless random walk (below 0.5 it
-over-predicts, above 0.5 it under-predicts — BTC's short-horizon momentum).
-A one-parameter Platt scaling in logit space fixes it: sharpen the odds.
+The 30-day backtest appeared to show the raw GBM model was slightly
+*under-dispersed* — reality more decisive than a driftless random walk — and
+this scaling was added to sharpen the odds in response.
+
+That premise is now known to be wrong. The replay it was fit on
+(`collect_samples`) carries a one-minute look-ahead: it prices a sample with a
+bar whose close is only knowable a minute after the `minutes_left` label
+claims (issue #2). Refit with the alignment corrected, the slope is a ≈ 0.99 —
+essentially the identity. The "short-horizon momentum" this was correcting for
+was the model having already seen a minute of that momentum. The transform is
+kept because it is frozen, near-identity, and provably immaterial to the
+headline result (`market-backtest --no-recal` moves net PnL by 0.01c), but it
+should not be described as correcting a real property of BTC.
 
     p_cal = sigmoid(a * logit(p) + b)         a>1 sharpens toward the extremes
 
